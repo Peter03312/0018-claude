@@ -82,3 +82,101 @@ test('旋转+镜像组合：背胶面、上边在右、尖端朝上 → 目录�
   await expect(page.getByTestId('result-direction')).toHaveText('目录视向：右');
   await expect(page.getByTestId('figure-rotated')).toContainText('顺时针 270°');
 });
+
+test.describe('复核链接交接', () => {
+  test.beforeEach(async ({ context }) => {
+    // 允许真实剪贴板写入（仅对 Chromium 生效）
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  });
+
+  test('背胶面·上边朝右·尖端朝上：复制复核链接，同事打开即见相同选择/步骤图/结论', async ({
+    page,
+    context,
+  }) => {
+    // —— 鉴定员完成一次校核 ——
+    await page.getByTestId('face-control-gum').click();
+    await page.getByTestId('top-control-R').click();
+    await page.getByTestId('tip-control-U').click();
+    await expect(page.getByTestId('result-direction')).toHaveText('目录视向：右');
+
+    // 结论产生后才有复制入口
+    const copyBtn = page.getByTestId('copy-review-link');
+    await expect(copyBtn).toBeVisible();
+
+    await copyBtn.click();
+    await expect(page.getByTestId('copy-status')).toContainText('已复制');
+
+    // 复制内容只包含当前三项选择
+    const copied = await page.evaluate(() =>
+      navigator.clipboard.readText(),
+    );
+    const link = new URL(copied);
+    expect(Array.from(link.searchParams.keys())).toEqual([
+      'face',
+      'top',
+      'tip',
+    ]);
+    expect(link.searchParams.get('face')).toBe('gum');
+    expect(link.searchParams.get('top')).toBe('R');
+    expect(link.searchParams.get('tip')).toBe('U');
+
+    // —— 同事打开链接：相同选择、步骤图与结论 ——
+    const colleague = await context.newPage();
+    await colleague.goto(copied);
+
+    await expect(
+      colleague.getByTestId('face-control-gum'),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await expect(colleague.getByTestId('top-control-R')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(colleague.getByTestId('tip-control-U')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(
+      colleague.getByTestId('result-direction'),
+    ).toHaveText('目录视向：右');
+    await expect(
+      colleague.getByTestId('figure-final-direction'),
+    ).toHaveText('目录视向：右');
+    await expect(colleague.getByTestId('figure-rotated')).toContainText(
+      '顺时针 270°',
+    );
+    await expect(colleague.getByTestId('figure-mirror')).toContainText(
+      '左右镜像',
+    );
+    await expect(colleague.getByTestId('copy-review-link')).toBeVisible();
+
+    await colleague.close();
+  });
+
+  test('链接取值未知：仅忽略该字段并就近提示重新选择，其他合法字段保留', async ({
+    page,
+  }) => {
+    await page.goto('/?tip=U&top=??&face=gum'); // 乱序 + top 未知
+
+    await expect(page.getByTestId('face-control-gum')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(page.getByTestId('tip-control-U')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(page.getByTestId('top-control-error')).toBeVisible();
+    await expect(page.getByTestId('top-control-error')).toContainText(
+      '重新选择',
+    );
+    // 另外两项无错误，结论暂不产生
+    await expect(page.getByTestId('face-control-error')).toHaveCount(0);
+    await expect(page.getByTestId('tip-control-error')).toHaveCount(0);
+    await expect(page.getByTestId('result-direction')).toHaveCount(0);
+
+    // 重新选择上边后提示消失，按恢复出的三项继续走原归一
+    await page.getByTestId('top-control-R').click();
+    await expect(page.getByTestId('top-control-error')).toHaveCount(0);
+    await expect(page.getByTestId('result-direction')).toHaveText('目录视向：右');
+  });
+});

@@ -7,10 +7,102 @@ import {
   rotationDegrees,
   type Direction,
   type Face,
+  type NormalizationInput,
 } from './domain/orientation';
+import {
+  buildReviewUrl,
+  parseReviewParams,
+  type ReviewField,
+} from './domain/reviewLink';
 import { StampFigure } from './components/StampFigure';
 
 type Maybe<T> = T | undefined;
+
+/** 首次加载时解析复核链接：合法字段恢复为选择，未知取值仅登记后忽略 */
+function readInitialReview(): {
+  values: Partial<NormalizationInput>;
+  invalid: Set<ReviewField>;
+  linkLoaded: boolean;
+} {
+  // 仅在首次渲染执行一次（jsdom/浏览器均提供 location.search）。
+  const parsed = parseReviewParams(window.location.search);
+  const linkLoaded =
+    parsed.unknown.size > 0 ||
+    parsed.values.face !== undefined ||
+    parsed.values.top !== undefined ||
+    parsed.values.tip !== undefined;
+  return {
+    values: parsed.values,
+    invalid: new Set(parsed.unknown),
+    linkLoaded,
+  };
+}
+
+/** 复制到系统剪贴板；浏览器拒绝授权或不支持时抛出，由调用方就近反馈 */
+async function writeClipboard(text: string): Promise<void> {
+  const clipboard = window.navigator.clipboard;
+  if (!clipboard?.writeText) {
+    throw new Error('clipboard unavailable');
+  }
+  await clipboard.writeText(text);
+}
+
+function ReviewShare({
+  face,
+  top,
+  tip,
+}: {
+  face: Face;
+  top: Direction;
+  tip: Direction;
+}) {
+  // 复核链接只承载当前三项选择（剥离其他查询参数与哈希）；
+  // 任一选择变化都会导致结论区整体重挂载，这里重新计算即可。
+  const href = useMemo(
+    () =>
+      buildReviewUrl({ face, top, tip }, window.location.href),
+    [face, top, tip],
+  );
+  const [status, setStatus] = useState<'idle' | 'success' | 'failure'>('idle');
+
+  return (
+    <span className="review-share" data-testid="review-share">
+      <button
+        type="button"
+        className="copy-link-btn"
+        data-testid="copy-review-link"
+        onClick={async () => {
+          try {
+            await writeClipboard(href);
+            setStatus('success');
+          } catch {
+            // 拒绝剪贴板访问：在按钮旁反馈失败，不改变当前结论
+            setStatus('failure');
+          }
+        }}
+      >
+        复制复核链接
+      </button>
+      {status === 'success' && (
+        <span className="copy-status copy-status-ok" data-testid="copy-status">
+          ✓ 已复制，可发给同事
+        </span>
+      )}
+      {status === 'failure' && (
+        <span className="copy-status copy-status-fail" data-testid="copy-status">
+          ⚠ 浏览器拒绝了剪贴板访问，请手动复制：
+          <a
+            className="review-link"
+            data-testid="review-link-anchor"
+            href={href}
+          >
+            {href}
+          </a>
+        </span>
+      )}
+    </span>
+  );
+}
 
 interface ChoiceGroupProps<T extends string> {
   testid: string;
@@ -66,9 +158,15 @@ function ChoiceGroup<T extends string>({
 const FACES: readonly Face[] = ['design', 'gum'];
 
 export default function App() {
-  const [face, setFace] = useState<Maybe<Face>>(undefined);
-  const [top, setTop] = useState<Maybe<Direction>>(undefined);
-  const [tip, setTip] = useState<Maybe<Direction>>(undefined);
+  // 首次加载即从复核链接恢复合法字段；恢复后继续走原有归一流程，
+  // 无查询参数的访问与原手动校核流程完全一致（三项均为 undefined）。
+  const [initial] = useState(readInitialReview);
+  const [face, setFace] = useState<Maybe<Face>>(initial.values.face);
+  const [top, setTop] = useState<Maybe<Direction>>(initial.values.top);
+  const [tip, setTip] = useState<Maybe<Direction>>(initial.values.tip);
+  // 链接中取了未知值的字段：仅忽略并就近提示重新选择；用户在该控件
+  // 任意选择一次后提示消失。
+  const [invalid, setInvalid] = useState<Set<ReviewField>>(initial.invalid);
   const [touched, setTouched] = useState({
     face: false,
     top: false,
@@ -77,12 +175,21 @@ export default function App() {
   const [attempted, setAttempted] = useState(false);
 
   const showError = (key: keyof typeof touched) =>
-    attempted || touched[key];
+    attempted || touched[key] || invalid.has(key);
+
+  const invalidHint = (key: ReviewField) =>
+    invalid.has(key) ? '链接中的取值无法识别，请重新选择' : undefined;
 
   const errors = {
-    face: face === undefined ? '请选择观察面' : undefined,
-    top: top === undefined ? '请指出邮票上边所在方向' : undefined,
-    tip: tip === undefined ? '请选择水印尖端方向' : undefined,
+    face:
+      invalidHint('face') ??
+      (face === undefined ? '请选择观察面' : undefined),
+    top:
+      invalidHint('top') ??
+      (top === undefined ? '请指出邮票上边所在方向' : undefined),
+    tip:
+      invalidHint('tip') ??
+      (tip === undefined ? '请选择水印尖端方向' : undefined),
   };
 
   // 只要任一选择变化，结论即依据当前三项重新计算；缺项时结果为 undefined，
@@ -102,6 +209,13 @@ export default function App() {
   ) => {
     setter(current === next ? undefined : next);
     setTouched((t) => ({ ...t, [key]: true }));
+    // 用户重新选择后，链接未知取值提示随之清除
+    setInvalid((s) => {
+      if (!s.has(key)) return s;
+      const next2 = new Set(s);
+      next2.delete(key);
+      return next2;
+    });
   };
 
   const cwDegrees = top !== undefined ? rotationDegrees(top) : 0;
@@ -173,12 +287,15 @@ export default function App() {
           <strong data-testid="result-direction">
             目录视向：{DIRECTION_LABEL[result.catalog]}
           </strong>
+          <ReviewShare face={face!} top={top!} tip={tip!} />
         </section>
       ) : (
         (attempted ||
           touched.face ||
           touched.top ||
-          touched.tip) && (
+          touched.tip ||
+          invalid.size > 0 ||
+          initial.linkLoaded) && (
           <section className="result result-pending" data-testid="result-banner">
             选择不完整：请补全上方带提示的选择项后，才会给出结论。
           </section>
