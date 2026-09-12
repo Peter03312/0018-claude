@@ -1,0 +1,28 @@
+services:
+  # 常驻 web：Compose 运行的静态站点，宿主端口可用 WEB_PORT 覆盖
+  web:
+    build:
+      context: .
+      target: web
+    image: watermark-checker-web:latest
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # 一次性验收：类型检查 → Vitest 全部离散组合 → Playwright 实际点选流程
+  # 用法：docker compose run --rm verify
+  verify:
+    build:
+      context: .
+      target: verify
+    image: watermark-checker-verify:latest
+    environment:
+      WEB_PORT: "${WEB_PORT:-8080}"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    command: ["npm", "run", "verify"]
+    # verify 内部由 Playwright 自行启动 vite preview，不依赖 web 容器
